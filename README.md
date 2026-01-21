@@ -33,6 +33,12 @@ Camera → Encoder → Raspberry Pi (MPTCP Client) → Dual Cellular → Cloud V
 - **Event timeline** of quality changes and alerts
 - **Post-stream reports** with statistics
 
+### IRLToolkit Integration (v1.2.0)
+- **OBS HTTP Bridge** - HTTP-based OBS control for external integrations
+- **SRTLA Transport** - Alternative bonded transport using SRT link aggregation
+- **RTMP Authentication** - Stream key validation via nginx-rtmp-auth
+- **simpleobsws** - Optional async OBS WebSocket library
+
 ## 📋 Prerequisites
 
 ### Hardware
@@ -533,11 +539,96 @@ To complete for production use, implement:
 3. OBS WebSocket integration
 4. Background monitoring loop
 
+## 🔌 IRLToolkit Integration (v1.2.0)
+
+VVLIVE integrates with tools from the IRLToolkit organization for enhanced streaming capabilities. All features are **opt-in** and disabled by default.
+
+### OBS HTTP Bridge
+
+Enables HTTP-based OBS control for external integrations (Stream Deck, Discord bots, automation scripts).
+
+```env
+# Enable OBS HTTP Bridge
+FEATURE_OBS_HTTP_BRIDGE=true
+OBS_HTTP_BRIDGE_HOST=localhost
+OBS_HTTP_BRIDGE_PORT=5001
+OBS_HTTP_BRIDGE_AUTH_KEY=your-secret-key  # Optional
+```
+
+**API Endpoints:**
+- `GET /api/obs-http/status` - Bridge status
+- `POST /api/obs-http/scene?scene_name=MyScene` - Switch scene
+- `GET /api/obs-http/health` - Health check
+
+**Requires:** Separate [obs-websocket-http](https://github.com/IRLToolkit/obs-websocket-http) service running.
+
+### SRTLA Transport
+
+Alternative bonded transport using SRT link aggregation as complement/alternative to MPTCP.
+
+```env
+# Enable SRTLA Transport
+FEATURE_SRTLA_TRANSPORT=true
+SRTLA_METRICS_SOURCE=api  # socket | file | api
+SRTLA_STATS_ENDPOINT=http://localhost:9001/stats
+SRTLA_RECEIVER_PORT=9000
+TRANSPORT_MODE=srtla  # mptcp | srtla | hybrid
+```
+
+**API Endpoints:**
+- `GET /api/srtla/status` - Adapter status
+- `GET /api/srtla/metrics` - Normalized metrics (VVLIVE format)
+- `GET /api/srtla/raw` - Raw SRTLA statistics
+
+**Requires:** [srtla](https://github.com/IRLToolkit/srtla) sender and receiver deployed.
+
+### RTMP Authentication
+
+Documents and monitors nginx-rtmp-auth for ingest security. Authentication happens at nginx level.
+
+```env
+# Enable RTMP Auth Monitoring
+FEATURE_RTMP_AUTH=true
+RTMP_AUTH_SERVICE_URL=http://localhost:8080/health  # Optional health endpoint
+```
+
+**API Endpoints:**
+- `GET /api/rtmp-auth/status` - Monitor status
+- `GET /api/rtmp-auth/health` - Auth service health check
+- `GET /api/rtmp-auth/config-example/nginx` - Example nginx config
+- `GET /api/rtmp-auth/config-example/auth` - Example auth.json
+
+**Requires:** [nginx-rtmp-auth](https://github.com/IRLToolkit/nginx-rtmp-auth) configured in nginx.
+
+### simpleobsws Library
+
+Optional alternative OBS WebSocket library from IRLToolkit with cleaner async interface.
+
+```env
+# Use simpleobsws instead of native implementation
+OBS_LIBRARY=simpleobsws  # obs-websocket-py | simpleobsws
+```
+
+**API Endpoint:**
+- `GET /api/obs/library-info` - Show configured library and availability
+
+### Disabling IRLToolkit Features
+
+All features are disabled by default. To explicitly disable:
+
+```env
+FEATURE_OBS_HTTP_BRIDGE=false
+FEATURE_SRTLA_TRANSPORT=false
+FEATURE_RTMP_AUTH=false
+OBS_LIBRARY=obs-websocket-py
+```
+
 ## 📚 Additional Documentation
 
 - **Architecture:** See `docs/architecture.md`
 - **Tutorial:** See `docs/tutorial.md`
 - **Integration Status:** See `INTEGRATION_STATUS.md`
+- **IRLToolkit Design:** See `docs/IRLTOOLKIT_INTEGRATION_DESIGN.md`
 - **API Documentation:** Run backend and visit http://localhost:8000/docs
 
 ## 🤝 Contributing
