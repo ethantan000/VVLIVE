@@ -6,9 +6,16 @@ function App() {
   const [bandwidth, setBandwidth] = useState(0)
 
   useEffect(() => {
-    // Connect to backend
-    fetch('/health')
-      .then(res => res.json())
+    // Connect to backend health endpoint
+    // Vite proxy will forward /api/* to backend in dev
+    // Nginx will forward /api/* to backend in production
+    fetch('/api/health')
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+        }
+        return res.json()
+      })
       .then(data => {
         setStatus('connected')
         console.log('Backend connected:', data)
