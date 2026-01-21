@@ -20,6 +20,10 @@ from .database import init_database
 from .models import QualityState, QUALITY_PRESETS
 from .state_machine import AdaptiveStateMachine, RetryLogicWrapper
 from .obs_controller import OBSController
+from .obs_http_bridge import OBSHTTPBridgeClient
+from .obs_websocket_adapter import get_library_info as get_obs_library_info
+from .srtla_adapter import SRTLAMetricsAdapter
+from .rtmp_auth_monitor import RTMPAuthMonitor
 from .ingest_monitor import IngestMonitor
 from .metrics_aggregator import MetricsAggregator
 
@@ -42,6 +46,11 @@ async def lifespan(app: FastAPI):
         f"Ingest={settings.feature_ingest_monitoring}, "
         f"Retry={settings.feature_retry_logic}, "
         f"Dual={settings.feature_dual_metrics}"
+    )
+    logger.info(
+        f"IRLToolkit features: OBS_HTTP={settings.feature_obs_http_bridge}, "
+        f"SRTLA={settings.feature_srtla_transport}, "
+        f"RTMP_Auth={settings.feature_rtmp_auth}"
     )
 
     # Initialize database
@@ -67,6 +76,11 @@ async def lifespan(app: FastAPI):
     app.state.obs_controller: Optional[OBSController] = None
     app.state.ingest_monitor: Optional[IngestMonitor] = None
     app.state.metrics_aggregator: Optional[MetricsAggregator] = None
+
+    # Initialize IRLToolkit integration components (opt-in)
+    app.state.obs_http_bridge: Optional[OBSHTTPBridgeClient] = None
+    app.state.srtla_adapter: Optional[SRTLAMetricsAdapter] = None
+    app.state.rtmp_auth_monitor: Optional[RTMPAuthMonitor] = None
 
     # OBS Controller
     if settings.feature_obs_integration:
@@ -95,6 +109,33 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to initialize Metrics Aggregator: {e}")
 
+    # OBS HTTP Bridge (IRLToolkit integration)
+    if settings.feature_obs_http_bridge:
+        try:
+            app.state.obs_http_bridge = OBSHTTPBridgeClient()
+            await app.state.obs_http_bridge.start()
+            logger.info("OBS HTTP Bridge Client started")
+        except Exception as e:
+            logger.error(f"Failed to start OBS HTTP Bridge: {e}")
+
+    # SRTLA Metrics Adapter (IRLToolkit integration)
+    if settings.feature_srtla_transport:
+        try:
+            app.state.srtla_adapter = SRTLAMetricsAdapter()
+            await app.state.srtla_adapter.start()
+            logger.info("SRTLA Metrics Adapter started")
+        except Exception as e:
+            logger.error(f"Failed to start SRTLA Adapter: {e}")
+
+    # RTMP Auth Monitor (IRLToolkit integration)
+    if settings.feature_rtmp_auth:
+        try:
+            app.state.rtmp_auth_monitor = RTMPAuthMonitor()
+            await app.state.rtmp_auth_monitor.start()
+            logger.info("RTMP Auth Monitor started")
+        except Exception as e:
+            logger.error(f"Failed to start RTMP Auth Monitor: {e}")
+
     yield
 
     # Shutdown
@@ -115,6 +156,30 @@ async def lifespan(app: FastAPI):
             logger.info("Ingest Monitor stopped")
         except Exception as e:
             logger.error(f"Error stopping Ingest Monitor: {e}")
+
+    # Cleanup OBS HTTP Bridge
+    if app.state.obs_http_bridge:
+        try:
+            await app.state.obs_http_bridge.stop()
+            logger.info("OBS HTTP Bridge stopped")
+        except Exception as e:
+            logger.error(f"Error stopping OBS HTTP Bridge: {e}")
+
+    # Cleanup SRTLA Adapter
+    if app.state.srtla_adapter:
+        try:
+            await app.state.srtla_adapter.stop()
+            logger.info("SRTLA Adapter stopped")
+        except Exception as e:
+            logger.error(f"Error stopping SRTLA Adapter: {e}")
+
+    # Cleanup RTMP Auth Monitor
+    if app.state.rtmp_auth_monitor:
+        try:
+            await app.state.rtmp_auth_monitor.stop()
+            logger.info("RTMP Auth Monitor stopped")
+        except Exception as e:
+            logger.error(f"Error stopping RTMP Auth Monitor: {e}")
 
 
 # Create FastAPI app
@@ -290,6 +355,170 @@ async def reset_retry_counters():
             "success": False,
             "message": "Retry logic not enabled"
         }
+
+
+# ============================================================================
+# IRLTOOLKIT INTEGRATION ENDPOINTS (Opt-In Features)
+# ============================================================================
+
+@app.get("/api/obs-http/status")
+async def get_obs_http_bridge_status():
+    """Get OBS HTTP Bridge client status"""
+    if not app.state.obs_http_bridge:
+        return {
+            "enabled": False,
+            "message": "OBS HTTP Bridge not enabled"
+        }
+    return app.state.obs_http_bridge.get_status()
+
+
+@app.get("/api/obs-http/health")
+async def get_obs_http_bridge_health():
+    """Check OBS HTTP Bridge health (async)"""
+    if not app.state.obs_http_bridge:
+        return {
+            "enabled": False,
+            "message": "OBS HTTP Bridge not enabled"
+        }
+    return await app.state.obs_http_bridge.check_health()
+
+
+@app.post("/api/obs-http/scene")
+async def switch_obs_scene_via_http(scene_name: str):
+    """Switch OBS scene via HTTP bridge"""
+    if not app.state.obs_http_bridge:
+        return {
+            "success": False,
+            "message": "OBS HTTP Bridge not enabled"
+        }
+
+    success = await app.state.obs_http_bridge.switch_scene(scene_name)
+    return {
+        "success": success,
+        "scene_name": scene_name,
+        "via": "http_bridge"
+    }
+
+
+@app.get("/api/obs-http/scene")
+async def get_current_scene_via_http():
+    """Get current OBS scene via HTTP bridge"""
+    if not app.state.obs_http_bridge:
+        return {
+            "enabled": False,
+            "message": "OBS HTTP Bridge not enabled"
+        }
+
+    scene = await app.state.obs_http_bridge.get_current_scene()
+    return {
+        "current_scene": scene,
+        "via": "http_bridge"
+    }
+
+
+@app.get("/api/obs/library-info")
+async def get_obs_library_status():
+    """Get information about OBS WebSocket library configuration"""
+    return get_obs_library_info()
+
+
+@app.get("/api/srtla/status")
+async def get_srtla_status():
+    """Get SRTLA transport adapter status"""
+    if not app.state.srtla_adapter:
+        return {
+            "enabled": False,
+            "message": "SRTLA transport not enabled"
+        }
+    return app.state.srtla_adapter.get_status()
+
+
+@app.get("/api/srtla/metrics")
+async def get_srtla_metrics():
+    """Get SRTLA metrics in VVLIVE NetworkMetrics format"""
+    if not app.state.srtla_adapter:
+        return {
+            "enabled": False,
+            "message": "SRTLA transport not enabled"
+        }
+
+    metrics = app.state.srtla_adapter.get_network_metrics()
+    if metrics:
+        return {
+            "enabled": True,
+            "bandwidth_mbps": metrics.total_bandwidth_mbps,
+            "packet_loss_percent": metrics.packet_loss_percent,
+            "min_rtt_ms": metrics.min_rtt_ms,
+            "max_rtt_ms": metrics.max_rtt_ms,
+            "active_links": metrics.active_subflows
+        }
+    else:
+        return {
+            "enabled": True,
+            "message": "No metrics data available yet"
+        }
+
+
+@app.get("/api/srtla/raw")
+async def get_srtla_raw_stats():
+    """Get raw SRTLA statistics for detailed monitoring"""
+    if not app.state.srtla_adapter:
+        return {
+            "enabled": False,
+            "message": "SRTLA transport not enabled"
+        }
+
+    stats = app.state.srtla_adapter.get_raw_stats()
+    if stats:
+        return {
+            "enabled": True,
+            **stats
+        }
+    else:
+        return {
+            "enabled": True,
+            "message": "No raw stats available yet"
+        }
+
+
+@app.get("/api/rtmp-auth/status")
+async def get_rtmp_auth_status():
+    """Get RTMP authentication monitor status"""
+    if not app.state.rtmp_auth_monitor:
+        return {
+            "enabled": False,
+            "message": "RTMP authentication not enabled"
+        }
+    return app.state.rtmp_auth_monitor.get_status()
+
+
+@app.get("/api/rtmp-auth/health")
+async def get_rtmp_auth_health():
+    """Check RTMP authentication service health"""
+    if not app.state.rtmp_auth_monitor:
+        return {
+            "enabled": False,
+            "message": "RTMP authentication not enabled"
+        }
+    return await app.state.rtmp_auth_monitor.check_health()
+
+
+@app.get("/api/rtmp-auth/config-example/nginx")
+async def get_rtmp_auth_nginx_example():
+    """Get example nginx configuration for RTMP auth"""
+    return {
+        "description": "nginx-rtmp configuration example for VVLIVE with nginx-rtmp-auth",
+        "config": RTMPAuthMonitor.get_nginx_config_example()
+    }
+
+
+@app.get("/api/rtmp-auth/config-example/auth")
+async def get_rtmp_auth_json_example():
+    """Get example authentication.json configuration"""
+    return {
+        "description": "Example authentication.json for nginx-rtmp-auth",
+        "config": RTMPAuthMonitor.get_auth_config_example()
+    }
 
 
 # ============================================================================
