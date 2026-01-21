@@ -2,21 +2,48 @@
 Configuration management for VVLIVE backend
 """
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+import sys
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8"
+    )
     """Application settings"""
-    
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False
-    
+
     # Security
     secret_key: str = "change-this-in-production"
     api_token: str = "change-this-in-production"
+
+    def validate_security(self):
+        """Validate security settings and warn about insecure defaults"""
+        insecure = []
+
+        if self.secret_key == "change-this-in-production":
+            insecure.append("SECRET_KEY")
+        if self.api_token == "change-this-in-production":
+            insecure.append("API_TOKEN")
+        if self.encoder_password == "admin":
+            insecure.append("ENCODER_PASSWORD")
+
+        if insecure and not self.debug:
+            logger.error("=" * 70)
+            logger.error("SECURITY WARNING: Insecure default values detected!")
+            logger.error(f"Please change these in .env file: {', '.join(insecure)}")
+            logger.error("=" * 70)
+            if not self.debug:
+                sys.exit(1)
     
     # Encoder
     encoder_ip: str = "192.168.1.100"
@@ -50,10 +77,10 @@ class Settings(BaseSettings):
     feature_silent_alerts: bool = True
     feature_post_stream_report: bool = True
     feature_timeline: bool = True
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 settings = Settings()
+
+# Validate security on module load (but only in production mode)
+if not settings.debug:
+    settings.validate_security()
