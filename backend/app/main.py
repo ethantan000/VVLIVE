@@ -1,16 +1,27 @@
 """
 VVLIVE Backend - Main Application
 FastAPI server with WebSocket support
+
+NOALBS Integration:
+- OBS WebSocket controller (opt-in)
+- Ingest stats monitoring (opt-in)
+- Retry logic wrapper (opt-in)
+- Dual metrics aggregation (opt-in)
 """
 
 import logging
+import asyncio
 from contextlib import asynccontextmanager
+from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import init_database
 from .models import QualityState, QUALITY_PRESETS
-from .state_machine import AdaptiveStateMachine
+from .state_machine import AdaptiveStateMachine, RetryLogicWrapper
+from .obs_controller import OBSController
+from .ingest_monitor import IngestMonitor
+from .metrics_aggregator import MetricsAggregator
 
 # Configure logging
 logging.basicConfig(
@@ -25,7 +36,13 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan"""
     # Startup
     logger.info("VVLIVE Backend starting...")
-    logger.info(f"Features enabled: Emergency={settings.feature_emergency_mode}")
+    logger.info(f"Core features: Emergency={settings.feature_emergency_mode}")
+    logger.info(
+        f"NOALBS features: OBS={settings.feature_obs_integration}, "
+        f"Ingest={settings.feature_ingest_monitoring}, "
+        f"Retry={settings.feature_retry_logic}, "
+        f"Dual={settings.feature_dual_metrics}"
+    )
 
     # Initialize database
     try:
@@ -34,14 +51,70 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
 
-    # Initialize state machine
-    app.state.quality_machine = AdaptiveStateMachine(initial_state=QualityState.MEDIUM)
-    logger.info(f"State machine initialized at {QualityState.MEDIUM.value}")
+    # Initialize core state machine
+    core_machine = AdaptiveStateMachine(initial_state=QualityState.MEDIUM)
+    logger.info(f"Core state machine initialized at {QualityState.MEDIUM.value}")
+
+    # Wrap with retry logic if enabled (NOALBS feature)
+    if settings.feature_retry_logic:
+        app.state.quality_machine = RetryLogicWrapper(core_machine)
+        logger.info("State machine wrapped with retry logic")
+    else:
+        app.state.quality_machine = core_machine
+        logger.info("Using core state machine without retry logic")
+
+    # Initialize NOALBS-inspired components (opt-in)
+    app.state.obs_controller: Optional[OBSController] = None
+    app.state.ingest_monitor: Optional[IngestMonitor] = None
+    app.state.metrics_aggregator: Optional[MetricsAggregator] = None
+
+    # OBS Controller
+    if settings.feature_obs_integration:
+        try:
+            app.state.obs_controller = OBSController()
+            # Connect to OBS (async, will retry on failure)
+            asyncio.create_task(app.state.obs_controller.connect())
+            logger.info("OBS Controller initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize OBS Controller: {e}")
+
+    # Ingest Monitor
+    if settings.feature_ingest_monitoring:
+        try:
+            app.state.ingest_monitor = IngestMonitor()
+            await app.state.ingest_monitor.start()
+            logger.info("Ingest Monitor started")
+        except Exception as e:
+            logger.error(f"Failed to start Ingest Monitor: {e}")
+
+    # Metrics Aggregator (requires ingest monitor)
+    if settings.feature_dual_metrics:
+        try:
+            app.state.metrics_aggregator = MetricsAggregator(app.state.ingest_monitor)
+            logger.info("Metrics Aggregator initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Metrics Aggregator: {e}")
 
     yield
 
     # Shutdown
     logger.info("VVLIVE Backend shutting down...")
+
+    # Cleanup OBS Controller
+    if app.state.obs_controller:
+        try:
+            await app.state.obs_controller.disconnect()
+            logger.info("OBS Controller disconnected")
+        except Exception as e:
+            logger.error(f"Error disconnecting OBS: {e}")
+
+    # Cleanup Ingest Monitor
+    if app.state.ingest_monitor:
+        try:
+            await app.state.ingest_monitor.stop()
+            logger.info("Ingest Monitor stopped")
+        except Exception as e:
+            logger.error(f"Error stopping Ingest Monitor: {e}")
 
 
 # Create FastAPI app
@@ -128,6 +201,100 @@ async def get_metrics():
         ]
     }
 
+
+# ============================================================================
+# NOALBS-INSPIRED ENDPOINTS (Opt-In Features)
+# ============================================================================
+
+@app.get("/api/obs/status")
+async def get_obs_status():
+    """Get OBS controller status"""
+    if not app.state.obs_controller:
+        return {
+            "enabled": False,
+            "message": "OBS integration not enabled"
+        }
+
+    return app.state.obs_controller.get_status()
+
+
+@app.post("/api/obs/scene")
+async def switch_obs_scene(scene_name: str):
+    """Manually switch OBS scene"""
+    if not app.state.obs_controller:
+        return {
+            "success": False,
+            "message": "OBS integration not enabled"
+        }
+
+    success = await app.state.obs_controller.switch_scene(scene_name)
+    return {
+        "success": success,
+        "scene_name": scene_name,
+        "current_scene": app.state.obs_controller.current_scene
+    }
+
+
+@app.get("/api/ingest/stats")
+async def get_ingest_stats():
+    """Get ingest server stats"""
+    if not app.state.ingest_monitor:
+        return {
+            "enabled": False,
+            "message": "Ingest monitoring not enabled"
+        }
+
+    return app.state.ingest_monitor.get_health()
+
+
+@app.get("/api/metrics/aggregated")
+async def get_aggregated_metrics():
+    """Get combined MPTCP + ingest metrics"""
+    if not app.state.metrics_aggregator:
+        return {
+            "enabled": False,
+            "message": "Dual metrics not enabled"
+        }
+
+    return app.state.metrics_aggregator.get_summary()
+
+
+@app.get("/api/state-machine/retry-status")
+async def get_retry_status():
+    """Get retry logic status and counters"""
+    machine = app.state.quality_machine
+
+    # Check if retry wrapper is active
+    if isinstance(machine, RetryLogicWrapper):
+        return machine.get_retry_status()
+    else:
+        return {
+            "enabled": False,
+            "message": "Retry logic not enabled"
+        }
+
+
+@app.post("/api/state-machine/reset-retry")
+async def reset_retry_counters():
+    """Reset retry counters (for testing/manual override)"""
+    machine = app.state.quality_machine
+
+    if isinstance(machine, RetryLogicWrapper):
+        machine.reset_counters()
+        return {
+            "success": True,
+            "message": "Retry counters reset"
+        }
+    else:
+        return {
+            "success": False,
+            "message": "Retry logic not enabled"
+        }
+
+
+# ============================================================================
+# WEBSOCKET ENDPOINT
+# ============================================================================
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

@@ -1,13 +1,19 @@
 """
 LOCKED Adaptive Quality State Machine
 DO NOT MODIFY without approval - production specification
+
+NOALBS-Inspired Enhancement:
+- Retry logic wrapper (opt-in via FEATURE_RETRY_LOGIC)
+- Instant recovery option (opt-in via INSTANT_RECOVERY_ENABLED)
+- Core state machine logic unchanged
 """
 
 import time
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from dataclasses import dataclass
 from .models import QualityState, QualityPreset, QUALITY_PRESETS
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -221,3 +227,176 @@ class AdaptiveStateMachine:
         old_state = self.context.current_state
         logger.info(f"TRANSITION: {old_state.value} → {target_state.value} | {reason}")
         self.context.transition_to(target_state)
+
+
+class RetryLogicWrapper:
+    """
+    NOALBS-Inspired Retry Logic Wrapper (Opt-In)
+
+    Wraps the core state machine to add retry counting before transitions.
+    Only active when FEATURE_RETRY_LOGIC is enabled. When disabled, passes
+    through directly to state machine without modification.
+
+    This prevents quality flapping from momentary network spikes.
+    """
+
+    def __init__(self, state_machine: AdaptiveStateMachine):
+        self.state_machine = state_machine
+        self.enabled = settings.feature_retry_logic
+        self.retry_attempts = settings.state_change_retry_attempts
+        self.instant_recovery = settings.instant_recovery_enabled
+
+        # Retry counters per potential transition
+        self.downgrade_counters: Dict[QualityState, int] = {}
+        self.upgrade_counters: Dict[QualityState, int] = {}
+        self.last_recommendation: Optional[Tuple[QualityState, str]] = None
+
+        logger.info(
+            f"Retry Logic Wrapper initialized "
+            f"(enabled={self.enabled}, attempts={self.retry_attempts}, "
+            f"instant_recovery={self.instant_recovery})"
+        )
+
+    def evaluate_with_retry(
+        self,
+        total_bandwidth_bps: float,
+        packet_loss_percent: float,
+        min_rtt_ms: float,
+        max_rtt_ms: float,
+        active_subflows: int
+    ) -> Optional[Tuple[QualityState, str]]:
+        """
+        Evaluate state transitions with retry logic
+
+        If retry logic is disabled, passes through directly to state machine.
+        If enabled, requires N consecutive recommendations before transitioning.
+        """
+        # Get recommendations from core state machine
+        downgrade_recommendation = self.state_machine.evaluate_downgrade(
+            total_bandwidth_bps, packet_loss_percent, max_rtt_ms, active_subflows
+        )
+
+        upgrade_recommendation = self.state_machine.evaluate_upgrade(
+            total_bandwidth_bps, packet_loss_percent, min_rtt_ms, active_subflows
+        )
+
+        # If retry logic disabled, apply immediately (original behavior)
+        if not self.enabled:
+            if downgrade_recommendation:
+                self.state_machine.apply_transition(*downgrade_recommendation)
+                return downgrade_recommendation
+            elif upgrade_recommendation:
+                self.state_machine.apply_transition(*upgrade_recommendation)
+                return upgrade_recommendation
+            return None
+
+        # Retry logic enabled - count recommendations
+        current_state = self.state_machine.get_current_state()
+
+        # Handle downgrade recommendations
+        if downgrade_recommendation:
+            target_state, reason = downgrade_recommendation
+
+            # Increment counter
+            if target_state not in self.downgrade_counters:
+                self.downgrade_counters[target_state] = 0
+            self.downgrade_counters[target_state] += 1
+
+            # Reset upgrade counters (condition changed)
+            self.upgrade_counters.clear()
+
+            retry_count = self.downgrade_counters[target_state]
+            logger.debug(
+                f"Downgrade to {target_state.value} recommended "
+                f"({retry_count}/{self.retry_attempts}): {reason}"
+            )
+
+            # Check if retry threshold met
+            if retry_count >= self.retry_attempts:
+                logger.info(
+                    f"Downgrade retry threshold met ({retry_count}/{self.retry_attempts}), "
+                    f"applying transition"
+                )
+                self.state_machine.apply_transition(target_state, reason)
+                self.downgrade_counters.clear()
+                return (target_state, reason)
+
+            return None
+
+        # Handle upgrade recommendations
+        elif upgrade_recommendation:
+            target_state, reason = upgrade_recommendation
+
+            # Clear downgrade counters (conditions improved)
+            self.downgrade_counters.clear()
+
+            # Instant recovery bypass (NOALBS pattern)
+            if self.instant_recovery:
+                logger.info(
+                    f"Instant recovery enabled, applying upgrade immediately: "
+                    f"{current_state.value} → {target_state.value}"
+                )
+                self.state_machine.apply_transition(target_state, reason)
+                self.upgrade_counters.clear()
+                return (target_state, reason)
+
+            # Normal upgrade with retry counting
+            if target_state not in self.upgrade_counters:
+                self.upgrade_counters[target_state] = 0
+            self.upgrade_counters[target_state] += 1
+
+            retry_count = self.upgrade_counters[target_state]
+            logger.debug(
+                f"Upgrade to {target_state.value} recommended "
+                f"({retry_count}/{self.retry_attempts}): {reason}"
+            )
+
+            # Check if retry threshold met
+            if retry_count >= self.retry_attempts:
+                logger.info(
+                    f"Upgrade retry threshold met ({retry_count}/{self.retry_attempts}), "
+                    f"applying transition"
+                )
+                self.state_machine.apply_transition(target_state, reason)
+                self.upgrade_counters.clear()
+                return (target_state, reason)
+
+            return None
+
+        # No recommendations - reset counters
+        else:
+            if self.downgrade_counters or self.upgrade_counters:
+                logger.debug("Conditions cleared, resetting retry counters")
+            self.downgrade_counters.clear()
+            self.upgrade_counters.clear()
+            return None
+
+    def get_retry_status(self) -> Dict[str, any]:
+        """Get current retry counter status (for diagnostics)"""
+        return {
+            "enabled": self.enabled,
+            "retry_attempts": self.retry_attempts,
+            "instant_recovery": self.instant_recovery,
+            "downgrade_counters": {
+                state.value: count
+                for state, count in self.downgrade_counters.items()
+            },
+            "upgrade_counters": {
+                state.value: count
+                for state, count in self.upgrade_counters.items()
+            }
+        }
+
+    def reset_counters(self):
+        """Reset all retry counters (for testing/manual override)"""
+        self.downgrade_counters.clear()
+        self.upgrade_counters.clear()
+        logger.info("Retry counters reset")
+
+    def get_current_state(self) -> QualityState:
+        """Pass-through to state machine"""
+        return self.state_machine.get_current_state()
+
+    def get_current_preset(self) -> QualityPreset:
+        """Pass-through to state machine"""
+        return self.state_machine.get_current_preset()

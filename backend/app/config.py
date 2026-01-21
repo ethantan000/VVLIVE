@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     # Database
     database_path: str = "./data/streaming.db"
     
-    # Features
+    # Features (existing)
     feature_emergency_mode: bool = True
     feature_audio_only_mode: bool = True
     feature_output_freeze_detection: bool = True
@@ -77,6 +77,36 @@ class Settings(BaseSettings):
     feature_silent_alerts: bool = True
     feature_post_stream_report: bool = True
     feature_timeline: bool = True
+
+    # NOALBS-Inspired Features (opt-in)
+    feature_obs_integration: bool = False
+    feature_ingest_monitoring: bool = False
+    feature_retry_logic: bool = False
+    feature_dual_metrics: bool = False
+
+    # Ingest Server Configuration (NOALBS pattern)
+    ingest_stats_url: str = "http://localhost/stats"
+    ingest_stream_key: str = "live/stream"
+    ingest_stats_poll_interval: int = 2  # seconds
+    ingest_server_type: str = "nginx"  # nginx, srt, node-media-server
+
+    # NOALBS-Style Bitrate Thresholds (kbps)
+    bitrate_threshold_low_kbps: int = 500
+    bitrate_threshold_offline_kbps: int = 450
+    bitrate_threshold_rtt_ms: int = 1000  # For SRT monitoring
+
+    # Retry Logic (NOALBS pattern)
+    state_change_retry_attempts: int = 5
+    state_change_retry_interval: int = 2  # seconds between checks
+    instant_recovery_enabled: bool = True  # Skip retries on upgrade
+
+    # OBS Scene Mapping
+    obs_scene_high: str = "Main Camera"
+    obs_scene_medium: str = "Main Camera"
+    obs_scene_low: str = "Simple Overlay"
+    obs_scene_very_low: str = "Audio Only"
+    obs_scene_error: str = "Stream Offline"
+    obs_scene_emergency: str = "Emergency Simple"
 
 
 settings = Settings()
