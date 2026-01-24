@@ -140,11 +140,13 @@ class OBSController:
             salt = auth_data["salt"]
 
             # OBS WebSocket v5 authentication:
-            # secret = SHA256(password + salt)
-            # auth = SHA256(secret + challenge)
-            secret = hashlib.sha256((self.password + salt).encode()).digest()
+            # 1. secret = base64(SHA256(password + salt))
+            # 2. auth = base64(SHA256(secret + challenge))
+            secret = base64.b64encode(
+                hashlib.sha256((self.password + salt).encode()).digest()
+            ).decode()
             auth = base64.b64encode(
-                hashlib.sha256(secret + challenge.encode()).digest()
+                hashlib.sha256((secret + challenge).encode()).digest()
             ).decode()
 
             # Send Identify message (OpCode 1)
@@ -357,6 +359,172 @@ class OBSController:
         """Check if connected and authenticated"""
         return self.state == OBSConnectionState.AUTHENTICATED
 
+    async def get_scenes(self) -> list:
+        """
+        Get list of available OBS scenes
+
+        Returns:
+            List of scene names
+        """
+        if not self.is_connected():
+            return []
+
+        try:
+            response = await self._send_request("GetSceneList")
+            if response:
+                scenes = response.get("scenes", [])
+                # OBS returns scenes in reverse order, so reverse them
+                return [s["sceneName"] for s in reversed(scenes)]
+            return []
+        except Exception as e:
+            logger.error(f"Failed to get scene list: {e}")
+            return []
+
+    async def get_streaming_status(self) -> Dict[str, Any]:
+        """
+        Get OBS streaming status
+
+        Returns:
+            Dict with streaming state information
+        """
+        if not self.is_connected():
+            return {"streaming": False, "recording": False}
+
+        try:
+            response = await self._send_request("GetStreamStatus")
+            if response:
+                return {
+                    "streaming": response.get("outputActive", False),
+                    "timecode": response.get("outputTimecode", "00:00:00"),
+                    "bytes_sent": response.get("outputBytes", 0),
+                    "kbits_per_sec": response.get("outputSkippedFrames", 0),
+                }
+
+            # Also get recording status
+            rec_response = await self._send_request("GetRecordStatus")
+            recording = False
+            if rec_response:
+                recording = rec_response.get("outputActive", False)
+
+            return {"streaming": False, "recording": recording}
+        except Exception as e:
+            logger.error(f"Failed to get streaming status: {e}")
+            return {"streaming": False, "recording": False}
+
+    async def start_streaming(self) -> bool:
+        """
+        Start OBS streaming
+
+        Returns:
+            True if successful
+        """
+        if not self.is_connected():
+            logger.warning("Cannot start streaming: Not connected to OBS")
+            return False
+
+        try:
+            response = await self._send_request("StartStream")
+            if response is not None:
+                logger.info("OBS streaming started")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to start streaming: {e}")
+            return False
+
+    async def stop_streaming(self) -> bool:
+        """
+        Stop OBS streaming
+
+        Returns:
+            True if successful
+        """
+        if not self.is_connected():
+            logger.warning("Cannot stop streaming: Not connected to OBS")
+            return False
+
+        try:
+            response = await self._send_request("StopStream")
+            if response is not None:
+                logger.info("OBS streaming stopped")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to stop streaming: {e}")
+            return False
+
+    async def get_screenshot(self, source_name: Optional[str] = None, width: int = 640, height: int = 360) -> Optional[str]:
+        """
+        Capture screenshot from OBS source or current scene
+
+        Args:
+            source_name: Name of source to capture (None = current scene)
+            width: Screenshot width
+            height: Screenshot height
+
+        Returns:
+            Base64-encoded JPEG image data or None if failed
+        """
+        if not self.is_connected():
+            logger.warning("Cannot capture screenshot: Not connected to OBS")
+            return None
+
+        try:
+            # Use current scene if no source specified
+            target = source_name or self.current_scene
+            if not target:
+                logger.warning("No source/scene specified for screenshot")
+                return None
+
+            request_data = {
+                "sourceName": target,
+                "imageFormat": "jpg",
+                "imageWidth": width,
+                "imageHeight": height,
+                "imageCompressionQuality": 80
+            }
+
+            response = await self._send_request("GetSourceScreenshot", request_data)
+            if response:
+                image_data = response.get("imageData", "")
+                # OBS returns data URL format: "data:image/jpeg;base64,..."
+                if image_data.startswith("data:"):
+                    # Extract just the base64 part
+                    return image_data.split(",", 1)[1] if "," in image_data else image_data
+                return image_data
+
+            return None
+        except Exception as e:
+            logger.error(f"Failed to capture screenshot: {e}")
+            return None
+
+    async def mute_source(self, source_name: str, mute: bool = True) -> bool:
+        """
+        Mute or unmute an audio source
+
+        Args:
+            source_name: Name of the source to mute
+            mute: True to mute, False to unmute
+
+        Returns:
+            True if successful
+        """
+        if not self.is_connected():
+            return False
+
+        try:
+            response = await self._send_request("SetInputMute", {
+                "inputName": source_name,
+                "inputMuted": mute
+            })
+            if response is not None:
+                logger.info(f"Source '{source_name}' {'muted' if mute else 'unmuted'}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to mute source: {e}")
+            return False
+
     def get_status(self) -> Dict[str, Any]:
         """Get current OBS controller status"""
         return {
@@ -364,5 +532,6 @@ class OBSController:
             "state": self.state.value,
             "connected": self.is_connected(),
             "current_scene": self.current_scene,
-            "host": f"{self.host}:{self.port}"
+            "host": f"{self.host}:{self.port}",
+            "scenes": []  # Will be populated async
         }
