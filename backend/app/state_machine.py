@@ -393,6 +393,11 @@ class RetryLogicWrapper:
         self.upgrade_counters.clear()
         logger.info("Retry counters reset")
 
+    @property
+    def context(self) -> StateContext:
+        """Pass-through to state machine context"""
+        return self.state_machine.context
+
     def get_current_state(self) -> QualityState:
         """Pass-through to state machine"""
         return self.state_machine.get_current_state()

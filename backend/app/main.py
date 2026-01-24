@@ -293,11 +293,14 @@ async def switch_obs_scene(scene_name: str):
         }
 
     success = await app.state.obs_controller.switch_scene(scene_name)
-    return {
+    result = {
         "success": success,
         "scene_name": scene_name,
         "current_scene": app.state.obs_controller.current_scene
     }
+    if not success:
+        result["message"] = "Failed to switch scene - OBS not connected"
+    return result
 
 
 @app.get("/api/ingest/stats")
